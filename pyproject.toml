@@ -1,0 +1,18 @@
+[project]
+name = "grammarchecker"
+version = "0.1.0"
+description = "Vietnamese Grammar Checker for Word using N-gram models"
+requires-python = ">=3.10"
+dependencies = [
+    "underthesea",
+    "nltk",
+    "pywin32",
+    "datasets",
+    "python-dotenv>=1.2.2",
+]
+
+[tool.setuptools]
+py-modules = ["grammar_checker", "word_integration", "ngram_storage"]
+
+[tool.setuptools.packages]
+find = { where = ["."], include = ["main*", "tests*"] }
