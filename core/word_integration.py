@@ -17,17 +17,19 @@ def process_document(input_file, output_file, checker):
         # Detect errors
         errors = checker.detect_errors(full_text)
 
-        # For each error, suggest correction (placeholder)
-        for error_sentence, prob in errors:
-            # In a real implementation, replace in document
-            # For simplicity, print errors
-            print(f"Potential error: {error_sentence} (prob: {prob})")
+            # For each error, show ranges (placeholder for correction logic)
+            for error_sentence, ranges in errors:
+                # In a real implementation, map ranges back to document and apply changes
+                print(f"Potential error: {error_sentence}")
+                for start, end in ranges:
+                    snippet = error_sentence[start:end]
+                    print(f"  Range: ({start}, {end}) -> '{snippet}'")
 
-        # Save the document (no changes yet)
-        doc.SaveAs(output_file)
-        doc.Close()
+            # Save the document (no changes yet)
+            doc.SaveAs(output_file)
+            doc.Close()
 
-    finally:
-        word.Quit()
+        finally:
+            word.Quit()
 
-    return errors
+        return errors

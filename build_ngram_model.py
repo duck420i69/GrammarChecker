@@ -20,6 +20,17 @@ def main():
         help="Path to SQLite database file (default: ngrams.db)"
     )
     parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from previous checkpoint if available (uses ./ngrams/<db>.ckpt)"
+    )
+    parser.add_argument(
+        "--checkpoint-interval",
+        type=int,
+        default=1000,
+        help="Number of documents between automatic commits/checkpoints (default: 1000)"
+    )
+    parser.add_argument(
         "--split",
         default="train",
         choices=["train", "validation", "test"],
@@ -58,12 +69,32 @@ def main():
     if args.sample:
         print(f"Sample size: {args.sample}")
     
-    storage = NGramStorage(args.db)
+    # Determine checkpoint path
+    checkpoint_path = os.path.join("./ngrams", args.db + ".ckpt")
+
+    start_index = 0
+    if args.resume:
+        # If resuming, read checkpoint if available
+        if os.path.exists(checkpoint_path):
+            try:
+                with open(checkpoint_path, 'r', encoding='utf-8') as fh:
+                    start_index = int(fh.read().strip() or 0)
+                    print(f"Resuming from checkpoint index {start_index}")
+            except Exception as e:
+                print(f"Warning: failed to read checkpoint file, starting from 0: {e}")
+        else:
+            print(f"No checkpoint file found at {checkpoint_path}, starting from 0")
+
+    # Keep existing DB when resuming
+    storage = NGramStorage(args.db, keep_existing=args.resume)
     storage.build_from_dataset(
         dataset_name=args.dataset,
         split=args.split,
         sample_size=args.sample,
-        hf_token=hf_token
+        hf_token=hf_token,
+        start_index=start_index,
+        checkpoint_path=checkpoint_path if args.resume or args.checkpoint_interval > 0 else None,
+        checkpoint_interval=args.checkpoint_interval
     )
     
     stats = storage.get_stats()

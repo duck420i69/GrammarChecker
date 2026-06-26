@@ -41,11 +41,12 @@ def example_1_train_and_check_with_memory():
     ]
     
     for sentence in test_sentences:
-        tokens = checker.tokenize_vietnamese(sentence)
-        prob = checker.get_ngram_probability(tokens)
+        tokens = tokenize_vietnamese(sentence)
+        token_probs = checker.get_ngram_probability(tokens)
+        avg_prob = sum(p for _, _, p in token_probs) / len(token_probs) if token_probs else 0.0
         print(f"Sentence: '{sentence}'")
         print(f"  Tokens: {tokens}")
-        print(f"  N-gram probability: {prob:.4f}")
+        print(f"  Avg per-token N-gram probability: {avg_prob:.4f}")
         print()
 
 
@@ -75,13 +76,18 @@ def example_2_build_and_check_with_sqlite():
     ]
     
     for sentence in test_sentences:
-        tokens = checker.tokenize_vietnamese(sentence)
-        prob = checker.get_ngram_probability(tokens)
+        tokens = tokenize_vietnamese(sentence)
+        token_probs = checker.get_ngram_probability(tokens)
+        avg_prob = sum(p for _, _, p in token_probs) / len(token_probs) if token_probs else 0.0
         errors = checker.detect_errors(sentence)
+        ranges = errors[0][1] if errors else []
         print(f"Sentence: '{sentence}'")
         print(f"  Tokens: {tokens[:5]}... (showing first 5)")
-        print(f"  N-gram probability: {prob:.6f}")
-        print(f"  Errors detected: {len(errors)}")
+        print(f"  Avg per-token N-gram probability: {avg_prob:.6f}")
+        print(f"  Wrong-token ranges: {ranges}")
+        if ranges:
+            for start, end in ranges:
+                print(f"    -> '{sentence[start:end]}' at ({start},{end})")
         print()
 
 

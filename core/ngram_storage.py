@@ -70,8 +70,10 @@ def preprocess_document(document):
 class NGramStorage:
     """Manage N-gram storage and retrieval from SQLite database."""
     
-    def __init__(self, db_path="ngrams.db"):
+    def __init__(self, db_path="ngrams.db", keep_existing=False):
+        # db_path passed as filename (e.g., 'ngrams.db')
         self.db_path = "./ngrams/" + db_path
+        self.keep_existing = keep_existing
         self.conn: Connection | None = None
         self.init_db()
 
@@ -82,18 +84,37 @@ class NGramStorage:
         self.id_map = {} # Cache for token to ID mapping
     
     def init_db(self):
-        """Initialize SQLite database with tables for N-grams."""
-        # if there is an existing database file, remove it to start fresh
-        # TODO: consider keeping existing database and updating it instead of rebuilding from scratch every time
-        if os.path.exists(self.db_path):
+        """Initialize SQLite database with tables for N-grams.
+
+        If keep_existing is False and a database file exists, remove it to
+        start fresh. If keep_existing is True and file exists, open it and
+        reuse tables (CREATE TABLE IF NOT EXISTS used for safety).
+        """
+        # create directory if missing
+        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+
+        if os.path.exists(self.db_path) and not self.keep_existing:
             os.remove(self.db_path)
 
         self.conn = sqlite3.connect(self.db_path)
+        if self.conn is None:
+            raise RuntimeError("Can't connect to DB. Exit...")
         cursor = self.conn.cursor()
 
         cursor.execute("PRAGMA journal_mode = OFF")
         cursor.execute("PRAGMA synchronous = OFF")
         cursor.execute("PRAGMA cache_size = 1000000")  # Use 1GB of RAM as cache
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS args (
+                id INTEGER PRIMARY KEY,
+                save_db TEXT NOT NULL,
+                training_set TEXT NOT NULL,
+                sample_size INTEGER,
+                start_index INTEGER,
+                checkpoint_interval INTEGER
+            )
+        """)
         
         # Create table for unigrams
         cursor.execute("""
@@ -166,8 +187,7 @@ class NGramStorage:
 
             # Commit unigrams
             cursor.executemany("UPDATE unigrams SET frequency = frequency + ? WHERE id = ?",
-                               [(freq,
-                                 self.get_token_id(token, create=True))
+                               [(freq, self.get_token_id(token, create=True))
                                 for token, freq in self.unigram_counter.items()])
             cursor.executemany("""
             INSERT INTO bigrams (token1_id, token2_id, frequency)
@@ -192,8 +212,18 @@ class NGramStorage:
             self.trigram_counter.clear()
 
     
-    def build_from_dataset(self, dataset_name="undertheseanlp/UVW-2026", split="train", sample_size=None, hf_token=None):
-        """Build N-grams from Hugging Face dataset."""
+    def build_from_dataset(self, dataset_name="undertheseanlp/UVW-2026", split="train",
+                           sample_size=None, hf_token=None, start_index=0,
+                           checkpoint_path=None, checkpoint_interval=1000):
+        """Build N-grams from Hugging Face dataset with optional checkpoint/resume.
+            :param sample_size: number of samples to use for training
+            :param split: which set use for training ("train", "val", "test")
+            :param dataset_name: Huggingface dataset's name
+            :param hf_token: Token to access Huggingface (build slower without it)
+            :param start_index: index of first document to process (for resume).
+            :param checkpoint_path: path to write checkpoint file (stores next index to process).
+            :param checkpoint_interval: how many documents between commits/checkpoints.
+        """
         print(f"Loading {dataset_name} dataset...")
         dataset = load_dataset(dataset_name, split=split, token=hf_token, streaming=False)
         dataset = filter_dataset(dataset)
@@ -202,52 +232,56 @@ class NGramStorage:
             dataset = dataset.select(range(min(sample_size, len(dataset))))
         
         total = len(dataset)
-        print(f"Building N-grams from {total} documents...")
+        print(f"Building N-grams from {total} documents... (starting at {start_index})")
 
-        # Get max number of processes based on CPU cores, but limit to a reasonable number to avoid overwhelming the system
-        max_processes = min(8, os.cpu_count() - 1 or 1)
+        # Sequential processing with periodic commits and checkpoints to allow pause/resume
+        processed = 0
+        for idx, example in enumerate(tqdm(dataset, total=total, desc="Processing documents")):
+            if idx < start_index:
+                continue
 
-        # if multithread is not available, fallback to single-threaded processing
-        if max_processes < 2:
-            print("Multithreading not available, processing sequentially...")
-            for example in tqdm(dataset, total=total, desc="Processing documents"):
-                uni, bi, tri = self.build_process(example)
-                self.unigram_counter.update(uni)
-                self.bigram_counter.update(bi)
-                self.trigram_counter.update(tri)
-        else:
-            with Pool(processes=max_processes) as pool:
-                results = list(tqdm(
-                    pool.imap(self.build_process, dataset, chunksize=CHUNK_SIZE),
-                    total=total,
-                    desc="Processing documents"
-                ))
-            # Combine results from all processes
-            for uni, bi, tri in results:
-                self.unigram_counter.update(uni)
-                self.bigram_counter.update(bi)
-                self.trigram_counter.update(tri)
+            uni, bi, tri = self.build_process(example)
+            self.unigram_counter.update(uni)
+            self.bigram_counter.update(bi)
+            self.trigram_counter.update(tri)
+            processed += 1
 
-        # Commit all accumulated counters to database
+            # Periodic commit + checkpoint
+            if processed % checkpoint_interval == 0:
+                print(f"Checkpoint at document index {idx+1}. Committing to DB and writing checkpoint...")
+                self.commit_database()
+                if checkpoint_path:
+                    try:
+                        with open(checkpoint_path, 'w', encoding='utf-8') as fh:
+                            fh.write(str(idx+1))
+                    except Exception as e:
+                        print(f"Warning: failed to write checkpoint {checkpoint_path}: {e}")
+
+        # Final commit
         self.commit_database()
 
+        # Remove rare n-grams and optimize
         self.conn.execute("DELETE FROM trigrams WHERE frequency = 1")  # Remove rare trigrams to save space
         self.conn.execute("DELETE FROM bigrams WHERE frequency = 1")   # Remove rare bigrams to save space
         self.conn.commit()
         self.conn.execute("VACUUM")
         self.conn.commit()
         
+        # Remove checkpoint file when finished
+        if checkpoint_path and os.path.exists(checkpoint_path):
+            try:
+                os.remove(checkpoint_path)
+            except Exception:
+                pass
+
         print(f"N-gram model saved to {self.db_path}")
 
     @staticmethod
     def build_process(example):
         """Process a single document and return N-gram counters."""
         try:
-            # Use content field for Vietnamese text
             chunks = preprocess_document(example)
-
-            # Tokenize Vietnamese text
-            sentences = list(chain.from_iterable(map(underthesea.sent_tokenize, chunks)))
+            sentences = chain.from_iterable(map(underthesea.sent_tokenize, chunks))
 
             unigram_counter = collections.Counter()
             bigram_counter = collections.Counter()
