@@ -9,6 +9,7 @@ dependencies = [
     "pywin32",
     "datasets",
     "python-dotenv>=1.2.2",
+    "pytest>=9.1.1",
 ]
 
 [tool.setuptools]

@@ -62,33 +62,44 @@ class VietnameseGrammarChecker:
         return self.get_token_anomaly_scores(tokens, n=n)
 
     def _window_score(self, t1, t2, t3):
-        """Compute the bidirectional score for a single trigram window (t1, t2, t3)."""
+        """Compute the bidirectional score for a single trigram window (t1, t2, t3).
+
+        Uses bigram prefix frequency for denominator (P(t3|t1,t2)).
+        Guards against division-by-zero when database statistics are sparse.
+        """
         forward_freq = self.ngram_storage.get_trigram_frequency(t1, t2, t3)
         forward_prefix_freq = self.ngram_storage.get_bigram_frequency(t1, t2)
 
         backward_freq = self.ngram_storage.get_trigram_frequency(t3, t2, t1)
         backward_prefix_freq = self.ngram_storage.get_bigram_frequency(t2, t3)
 
-        forward_prob = (forward_freq + self.alpha) / (
-            forward_prefix_freq + self.alpha * self.vocab_size
-        )
-        backward_prob = (backward_freq + self.alpha) / (
-            backward_prefix_freq + self.alpha * self.vocab_size
-        )
+        vocab = max(self.vocab_size, 1)
+        denom_f = forward_prefix_freq + self.alpha * vocab
+        denom_b = backward_prefix_freq + self.alpha * vocab
+
+        forward_prob = (forward_freq + self.alpha) / denom_f if denom_f > 0 else 0.0
+        backward_prob = (backward_freq + self.alpha) / denom_b if denom_b > 0 else 0.0
 
         return math.sqrt(forward_prob * backward_prob)
 
     def _bigram_window_score(self, t1, t2):
-        """Compute the bidirectional score for a single bigram window (t1, t2)."""
-        forward_freq = self.ngram_storage.get_bigram_frequency(t1, t2)
-        backward_freq = self.ngram_storage.get_bigram_frequency(t2, t1)
+        """Compute the bidirectional score for a single bigram window (t1, t2).
 
-        forward_prob = (forward_freq + self.alpha) / (
-            forward_freq + self.alpha * self.vocab_size
-        )
-        backward_prob = (backward_freq + self.alpha) / (
-            backward_freq + self.alpha * self.vocab_size
-        )
+        Uses unigram frequency of the prefix token as denominator (P(t2|t1)).
+        Guards against division-by-zero when database statistics are sparse.
+        """
+        forward_freq = self.ngram_storage.get_bigram_frequency(t1, t2)
+        forward_prefix_freq = self.ngram_storage.get_unigram_frequency(t1)
+
+        backward_freq = self.ngram_storage.get_bigram_frequency(t2, t1)
+        backward_prefix_freq = self.ngram_storage.get_unigram_frequency(t2)
+
+        vocab = max(self.vocab_size, 1)
+        denom_f = forward_prefix_freq + self.alpha * vocab
+        denom_b = backward_prefix_freq + self.alpha * vocab
+
+        forward_prob = (forward_freq + self.alpha) / denom_f if denom_f > 0 else 0.0
+        backward_prob = (backward_freq + self.alpha) / denom_b if denom_b > 0 else 0.0
 
         return math.sqrt(forward_prob * backward_prob)
 
@@ -146,18 +157,17 @@ class VietnameseGrammarChecker:
 
         return result
 
-    def detect_incorrect_words(self, text, threshold=0.1, n=3):
+    def detect_incorrect_words(self, text, threshold=0.1):
         """Detect specific incorrect words in a sentence based on anomaly scores.
 
         Splits text into sentences, then for each sentence evaluates every
-        token's anomaly score. Tokens with a score below the threshold are
+        token's fit with neighbors. Tokens with a score below the threshold are
         returned as likely incorrect.
 
         Args:
             text: Input Vietnamese text string.
             threshold: Score threshold below which a token is flagged
                        as potentially incorrect (default: 0.1).
-            n: N-gram size (2 for bigrams, 3 for trigrams). Default is 3.
 
         Returns:
             List of (sentence, [(token, position_in_sentence, score), ...]) tuples.
@@ -168,30 +178,65 @@ class VietnameseGrammarChecker:
 
         for sentence in sentences:
             tokens = tokenize_vietnamese(sentence)
-            token_scores = self.get_token_anomaly_scores(tokens, n=n)
-            flagged = [
-                (token, pos, score)
-                for token, pos, score in token_scores
-                if score < threshold
-            ]
+            flagged = []
+            for pos, token in enumerate(tokens):
+                score = self._score_token_by_neighbors(tokens, pos)
+                if score < threshold:
+                    flagged.append((token, pos, score))
             if flagged:
                 results.append((sentence, flagged))
 
         return results
 
-    def detect_errors(self, text, threshold=0.1, n=3):
+    def _score_token_by_neighbors(self, tokens, pos):
+        """Score a token by checking its fit with neighbors (2 1 * 1 2 pattern).
+
+        Checks:
+        - (tokens[pos-2], tokens[pos-1], tokens[pos]) if pos >= 2
+        - (tokens[pos-1], tokens[pos]) if pos >= 1
+        - (tokens[pos], tokens[pos+1]) if pos < len-1
+        - (tokens[pos], tokens[pos+1], tokens[pos+2]) if pos < len-2
+
+        Returns average score of applicable patterns.
+        """
+        if pos < 0 or pos >= len(tokens):
+            return 0.0
+
+        scores = []
+
+        # Pattern: word 2 positions back + word 1 back + target (trigram)
+        if pos >= 2:
+            score = self._window_score(tokens[pos - 2], tokens[pos - 1], tokens[pos])
+            scores.append(score)
+
+        # Pattern: word 1 back + target (bigram)
+        if pos >= 1:
+            score = self._bigram_window_score(tokens[pos - 1], tokens[pos])
+            scores.append(score)
+
+        # Pattern: target + word 1 forward (bigram)
+        if pos < len(tokens) - 1:
+            score = self._bigram_window_score(tokens[pos], tokens[pos + 1])
+            scores.append(score)
+
+        # Pattern: target + word 1 forward + word 2 forward (trigram)
+        if pos < len(tokens) - 2:
+            score = self._window_score(tokens[pos], tokens[pos + 1], tokens[pos + 2])
+            scores.append(score)
+
+        return sum(scores) / len(scores) if scores else 0.0
+
+    def detect_errors(self, text, threshold=0.1):
         """Detect potential grammar errors and return character ranges of wrong tokens.
 
-        Splits text into sentences, tokenizes each, computes per-token anomaly scores
-        (bidirectional N-gram average). Tokens with score below `threshold` are
-        considered suspicious. For each suspicious token, returns its character
-        start/end positions within the sentence.
+        For each token, scores it by checking patterns with previous and next words
+        (2 1 * 1 2): trigrams with 2-back and trigrams with 2-forward, plus bigrams
+        with immediate neighbors. Tokens with score below `threshold` are flagged.
 
         Args:
             text: Input Vietnamese text string.
             threshold: Score threshold below which a token is flagged
                        as potentially incorrect (default: 0.1).
-            n: N-gram size used for scoring (default: 3).
 
         Returns:
             List of (sentence, [(start, end), ...]) tuples. `start` and `end`
@@ -205,18 +250,20 @@ class VietnameseGrammarChecker:
             if not tokens:
                 continue
 
-            # Get per-token anomaly scores: list of (token, pos, score)
-            token_scores = self.get_token_anomaly_scores(tokens, n=n)
+            # Score each token by its fit with neighbors
+            flagged_indices = []
+            for pos in range(len(tokens)):
+                score = self._score_token_by_neighbors(tokens, pos)
+                if score < threshold:
+                    flagged_indices.append(pos)
 
-            # Find token indices flagged as suspicious
-            flagged_indices = [pos for _, pos, score in token_scores if score < threshold]
             if not flagged_indices:
                 continue
 
             # Map token indices to character ranges in the sentence
             ranges = []
             search_pos = 0
-            for token, pos, score in token_scores:
+            for pos, token in enumerate(tokens):
                 if pos not in flagged_indices:
                     # advance search_pos to consume token even if not flagged
                     idx = sentence.find(token, search_pos)

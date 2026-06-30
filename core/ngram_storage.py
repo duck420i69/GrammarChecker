@@ -325,6 +325,13 @@ class NGramStorage:
         """, (token1, token2, token3))
         result = cursor.fetchone()
         return result[0] if result else 0
+
+    def get_unigram_frequency(self, token):
+        """Get frequency of a unigram token."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT frequency FROM unigrams WHERE token = ?", (token,))
+        res = cursor.fetchone()
+        return res[0] if res else 0
     
     def get_stats(self):
         """Get statistics about the N-gram database."""
