@@ -1,0 +1,6 @@
+.idea
+.pytest_cache
+.venv
+cache
+ngrams
+uv.lock
